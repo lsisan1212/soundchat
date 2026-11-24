@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+
+<html lang="zh-Hant"><head><meta charset="utf-8"><title>聲波傳字 Demo</title>
+
+<style>
+
+body{font-family:"Microsoft JhengHei",sans-serif;max-width:720px;margin:20px auto;padding:0 12px;background:#f4f6fa}
+
+.card{background:#fff;border-radius:10px;padding:16px;margin-bottom:14px;box-shadow:0 1px 4px #0002}
+
+textarea,input{width:100%;box-sizing:border-box;padding:8px;font-size:16px}
+
+.row{display:flex;gap:10px}.row label{flex:1;font-size:13px}
+
+button{padding:8px 16px;margin:8px 6px 0 0;font-size:15px;border:0;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer}
+
+button.stop{background:#dc2626}button.gray{background:#6b7280}
+
+#out{min-height:60px;font-size:20px;font-family:monospace;white-space:pre-wrap;border:1px solid #ccc;padding:8px;border-radius:6px;margin-top:10px}
+
+#stat{color:#555;font-size:13px;margin-top:6px}
+
+canvas{width:100%;height:90px;background:#111;border-radius:6px;margin-top:8px}
+
+</style></head><body>
+
+<h2>聲波傳字 Demo（FSK）</h2>
+
+<div class="card"><h3>發送端</h3>
+
+<textarea id="txt" rows="2">Hello 123</textarea>
+
+<div class="row"><label>每字長度 ms<input id="dur" type="number" value="120"></label><label>字間靜音 ms<input id="gap" type="number" value="60"></label></div>
+
+<button id="send">發送</button></div>
+
+<div class="card"><h3>接收端</h3>
+
+<div class="row"><label>音量門檻 dB<input id="thr" type="number" value="-65"></label></div>
+
+<button id="listen">開始收聽</button><button id="stop" class="stop">停止</button><button id="clr" class="gray">清除</button>
+
+<div id="out"></div><div id="stat">未啟動</div><canvas id="cv" width="700" height="90"></canvas></div>
+
+<script>
+
+const CFG={base:1000,step:40,first:32,last:126,stable:3,silence:2};
+
+const $=id=>document.getElementById(id);
+
+const freqOf=c=>CFG.base+(c-CFG.first)*CFG.step;
+
+let ctx,stream,an,buf,raf,lastCode=-1,stableCnt=0,silentCnt=99,emitted=false;
+
+function getCtx(){if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)();if(ctx.state==='suspended')ctx.resume();return ctx;}
+
+function send(){
+
+ const a=getCtx(),dur=+$('dur').value/1000,gap=+$('gap').value/1000;
+
+ let t=a.currentTime+0.1;
+
+ for(const ch of $('txt').value){
+
+  const c=ch.charCodeAt(0);if(c<CFG.first||c>CFG.last)continue;
+
+  const o=a.createOscillator(),g=a.createGain();
+
+  o.frequency.value=freqOf(c);
+
+  g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(0.8,t+0.01);
+
+  g.gain.setValueAtTime(0.8,t+dur-0.01);g.gain.linearRampToValueAtTime(0,t+dur);
+
+  o.connect(g);g.connect(a.destination);o.start(t);o.stop(t+dur+0.01);
+
+  t+=dur+gap;
+
+ }
+
+}
+
+async function listen(){
+
+ if(stream)return;
+
+ const a=getCtx();
+
+ try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});}
+
+ catch(e){$('stat').textContent='無法開啟咪高峰：'+e.message+'（需 https 或 localhost）';return;}
+
+ const src=a.createMediaStreamSource(stream);
+
+ an=a.createAnalyser();an.fftSize=8192;an.smoothingTimeConstant=0;
+
+ src.connect(an);buf=new Float32Array(an.frequencyBinCount);
+
+ loop();
+
+}
+
+function stopListen(){cancelAnimationFrame(raf);if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;$('stat').textContent='已停止';}
+
+function detect(){
+
+ an.getFloatFrequencyData(buf);
+
+ const hz=ctx.sampleRate/an.fftSize;
+
+ const lo=Math.floor((freqOf(CFG.first)-CFG.step/2)/hz),hi=Math.ceil((freqOf(CFG.last)+CFG.step/2)/hz);
+
+ let mi=lo,mv=-Infinity;
+
+ for(let i=lo;i<=hi;i++)if(buf[i]>mv){mv=buf[i];mi=i;}
+
+ const f=mi*hz;
+
+ return {mv,f,code:Math.round((f-CFG.base)/CFG.step)+CFG.first,lo,hi};
+
+}
+
+function loop(){
+
+ const r=detect(),thr=+$('thr').value;
+
+ if(r.mv>thr&&r.code>=CFG.first&&r.code<=CFG.last){
+
+  if(r.code===lastCode)stableCnt++;else{lastCode=r.code;stableCnt=1;}
+
+  silentCnt=0;
+
+  if(stableCnt>=CFG.stable&&!emitted){$('out').textContent+=String.fromCharCode(r.code);emitted=true;}
+
+ }else if(++silentCnt>=CFG.silence){emitted=false;lastCode=-1;stableCnt=0;}
+
+ $('stat').textContent='收聽中｜峰值 '+r.f.toFixed(0)+' Hz / '+r.mv.toFixed(1)+' dB';
+
+ draw(r);raf=requestAnimationFrame(loop);
+
+}
+
+function draw(r){
+
+ const c=$('cv'),g=c.getContext('2d'),w=c.width,h=c.height,n=r.hi-r.lo;
+
+ g.fillStyle='#111';g.fillRect(0,0,w,h);g.fillStyle='#22d3ee';
+
+ for(let x=0;x<w;x++){const v=buf[r.lo+Math.floor(x/w*n)];const y=Math.max(0,Math.min(h,(v+120)/100*h));g.fillRect(x,h-y,1,y);}
+
+ const ty=h-(+$('thr').value+120)/100*h;g.fillStyle='#f87171';g.fillRect(0,ty,w,1);
+
+}
+
+$('send').onclick=send;$('listen').onclick=listen;$('stop').onclick=stopListen;$('clr').onclick=()=>$('out').textContent='';
+
+</script></body></html>
+
